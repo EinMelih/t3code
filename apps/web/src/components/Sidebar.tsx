@@ -4259,8 +4259,11 @@ export default function Sidebar() {
     },
   );
 
+  // Waiting for move targets can outlast the right-click that asked for them.
+  const latestThreadContextMenuRef = useRef(0);
   const handleThreadContextMenu = useStableCallback(
     (threadRef: ScopedThreadRef, position: { x: number; y: number }) => {
+      const open = ++latestThreadContextMenuRef.current;
       void (async () => {
         const api = readLocalApi();
         if (!api) return;
@@ -4308,6 +4311,7 @@ export default function Sidebar() {
           (thread.handoff == null || thread.handoff.state === "failed")
             ? await readThreadHandoffTargets(thread.environmentId, thread.id)
             : [];
+        if (open !== latestThreadContextMenuRef.current) return;
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
             buildThreadActionMenuItems({
