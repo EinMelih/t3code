@@ -4,13 +4,16 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
+import * as SqlClient from "effect/sql/SqlClient";
 import { ProjectId } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
 import * as ReviewService from "./ReviewService.ts";
 
 function layer(input: {
@@ -20,9 +23,31 @@ function layer(input: {
   readonly worktreesDirectory?: string;
   readonly previousWorktreesDirectories?: ReadonlyArray<string>;
   readonly projectRoots?: ReadonlyArray<string> | "unavailable";
+  readonly threadWorktrees?: ReadonlyArray<{ worktreePath: string; deleted?: boolean }>;
 }) {
   const projectRoots = input.projectRoots ?? [];
   return ReviewService.layer.pipe(
+    Layer.provide(KnownWorkspaces.layer),
+    Layer.provide(
+      Layer.effectDiscard(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          for (const [index, thread] of (input.threadWorktrees ?? []).entries()) {
+            yield* sql`
+              INSERT INTO orchestration_v2_projection_threads (
+                thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+                created_at, updated_at, deleted_at, payload_json
+              ) VALUES (
+                ${`thread-${index}`}, 'project-0', 'Thread', 'codex', 'full-access', 'default',
+                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
+                ${thread.deleted ? "2026-01-02T00:00:00.000Z" : null},
+                ${JSON.stringify({ worktreePath: thread.worktreePath })}
+              )
+            `;
+          }
+        }),
+      ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
+    ),
     Layer.provide(
       Layer.mock(ProjectStore.ProjectStoreV2)({
         listShells: () =>
@@ -184,6 +209,50 @@ describe("ReviewService", () => {
         [projectRoot, "unavailable"],
       ] as const) {
         const error = yield* review(cwd, projectRoots).pipe(Effect.flip);
+        assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("allows the worktree a thread is bound to, and nothing else outside the project", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
+      const project = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-project-" });
+      // Checkouts outside every managed folder, as `git worktree add ../feature` makes.
+      const bound = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-bound-" });
+      const deleted = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-deleted-" });
+      const unbound = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-unbound-" });
+      yield* fs.makeDirectory(`${bound}/sub`);
+
+      const review = (cwd: string) =>
+        Effect.gen(function* () {
+          const service = yield* ReviewService.ReviewService;
+          return yield* service.getDiffPreview({ cwd });
+        }).pipe(
+          Effect.provide(
+            layer({
+              workspaceRoot,
+              baseDir,
+              projectRoots: [project],
+              threadWorktrees: [
+                { worktreePath: bound },
+                { worktreePath: deleted, deleted: true },
+                // A relative path would resolve against the server's own cwd.
+                { worktreePath: "t3-review-relative" },
+                // A filesystem root would make every folder look bound.
+                { worktreePath: "/" },
+              ],
+            }),
+          ),
+        );
+
+      for (const cwd of [bound, `${bound}/sub`]) {
+        assert.strictEqual((yield* review(cwd)).cwd, cwd);
+      }
+      for (const cwd of [deleted, unbound, `${process.cwd()}/t3-review-relative`]) {
+        const error = yield* review(cwd).pipe(Effect.flip);
         assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
       }
     }).pipe(Effect.provide(NodeServices.layer)),

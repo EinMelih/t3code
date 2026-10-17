@@ -22,11 +22,15 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { isFilesystemRoot, managedWorktreesDirectories } from "../worktreesDirectory.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import {
@@ -88,6 +92,8 @@ export const layer: Layer.Layer<
   | IdAllocator.IdAllocatorV2
   | FileSystem.FileSystem
   | Path.Path
+  | ServerConfig.ServerConfig
+  | ServerSettings.ServerSettingsService
   | GitWorkflowService.GitWorkflowService
   | ProjectService.ProjectService
   | ProviderAuthService.ProviderAuthService
@@ -103,6 +109,8 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const serverConfig = yield* ServerConfig.ServerConfig;
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
@@ -110,6 +118,57 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+
+    // Where git would create `target`: the real path of its nearest existing
+    // ancestor plus the missing rest, since git follows symlinks on the way.
+    const realLocation = (target: string): Effect.Effect<string> =>
+      fileSystem.realPath(target).pipe(
+        Effect.catch(() => {
+          const parent = path.dirname(target);
+          return parent === target
+            ? Effect.succeed(target)
+            : Effect.map(realLocation(parent), (real) => path.join(real, path.basename(target)));
+        }),
+      );
+
+    // A thread's path and branch can come from a client, so turn start only
+    // recreates a missing worktree where the server would have put it:
+    // `<managed worktrees folder>/<repo>/<branch>`, compared by real path.
+    const isManagedWorktreePath = Effect.fn("orchestrationV2.providerTurnStart.isManagedWorktree")(
+      function* (worktreePath: string) {
+        // git resolves a relative path against the project, not the server cwd.
+        if (!path.isAbsolute(worktreePath)) return false;
+        // Server-made paths are normalized. A `..` would be applied after git
+        // follows a symlink but before realPath does, so the two disagree.
+        if (path.resolve(worktreePath) !== worktreePath) return false;
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.orElseSucceed(() => ({
+            worktreesDirectory: "",
+            previousWorktreesDirectories: [],
+          })),
+        );
+        const roots = yield* Effect.forEach(
+          managedWorktreesDirectories(
+            settings,
+            serverConfig.worktreesDir,
+            path,
+            yield* HostProcess.HomeDirectory,
+          ),
+          realLocation,
+        );
+        const candidate = yield* realLocation(worktreePath);
+        return roots.some((root) => {
+          if (isFilesystemRoot(root, path)) return false;
+          const relative = path.relative(root, candidate);
+          const segments = relative.split(path.sep);
+          return (
+            !path.isAbsolute(relative) &&
+            segments.length === 2 &&
+            segments.every((segment) => segment !== "" && segment !== "..")
+          );
+        });
+      },
+    );
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -448,7 +507,7 @@ export const layer: Layer.Layer<
         const exists = yield* fileSystem
           .exists(worktreePath)
           .pipe(Effect.orElseSucceed(() => true));
-        if (!exists) {
+        if (!exists && (yield* isManagedWorktreePath(worktreePath))) {
           const project = yield* projects.getById(projection.thread.projectId).pipe(
             Effect.map(Option.getOrUndefined),
             Effect.orElseSucceed(() => undefined),
