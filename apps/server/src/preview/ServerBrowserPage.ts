@@ -143,7 +143,7 @@ const SNAPSHOT_SCRIPT = `(() => {
     url: location.href,
     title: document.title,
     loading: document.readyState !== "complete",
-    visibleText: (document.body?.innerText || "").slice(0, ${MAX_VISIBLE_TEXT_LENGTH}),
+    visibleText: document.body?.innerText || "",
     interactiveElements: [],
   };
 })()`;
@@ -164,12 +164,13 @@ const DOTTED_SCRIPT = `(() => {
       if (element.localName !== "input" && element.localName !== "textarea") continue;
       const dots = getComputedStyle(element).getPropertyValue("-webkit-text-security");
       if (element.type !== "password" && dots === "none") continue;
+      // Raw as page text shows it, and normalized as the tree does.
       for (const value of [element.value, element.defaultValue])
-        values.push(value.replace(/[\\u200b\\u00ad]/g, "").trim().replace(/\\s+/g, " "));
+        values.push(value, value.replace(/[\\u200b\\u00ad]/g, "").trim().replace(/\\s+/g, " "));
     }
   };
   visit(document);
-  return values.filter(Boolean);
+  return [...new Set(values.filter((value) => value.trim()))];
 })()`;
 
 const pageChanged = () =>
@@ -311,8 +312,8 @@ const openReaders = async (page: Page, cdp: CDPSession) => {
 /**
  * Matches each value as the snapshot prints it: raw, as a JSON name, as a
  * quoted value, and with '' for each quote inside a quoted key. A value under
- * four characters only matches a whole word; inside other words it would mask
- * unrelated text.
+ * four characters only matches between non-word characters; inside other words
+ * it would mask unrelated text.
  */
 const dottedPattern = (values: ReadonlyArray<string>) => {
   const sources = values
@@ -331,10 +332,10 @@ const dottedPattern = (values: ReadonlyArray<string>) => {
     .toSorted((a, b) => b.form.length - a.form.length)
     .map(({ form, word }) => {
       const literal = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      return word ? `(?<![^\\s"])${literal}(?![^\\s"])` : literal;
+      return word ? `(?<![\\p{L}\\p{N}_])${literal}(?![\\p{L}\\p{N}_])` : literal;
     });
   if (sources.length === 0) return undefined;
-  const pattern = new RegExp(sources.join("|"), "g");
+  const pattern = new RegExp(sources.join("|"), "gu");
   try {
     // Compiles it now, for one-byte and two-byte text: one too large fails only when it
     // first runs on each, naming every value.
@@ -414,6 +415,9 @@ const capture = async (
   const state = refsFor(input.page);
   invalidateRefs(input.page);
   const generation = state.generation;
+  const { readers, read } = await openReaders(input.page, input.cdp);
+  const before = await read();
+  // Taken between the reads, so a value that changes during either fails the comparison.
   // Awaited after the tree: a capture that fails has finished its tree before a retry starts.
   const pageAndScreenshot = Promise.all([
     input.page.evaluate(SNAPSHOT_SCRIPT) as Promise<
@@ -425,8 +429,6 @@ const capture = async (
     captureViewport(input.page, input.cdp, { format: "png", scale }),
   ]);
   void pageAndScreenshot.catch(constVoid);
-  const { readers, read } = await openReaders(input.page, input.cdp);
-  const before = await read();
   // Leaves time for the second read; a frame that never loads holds the tree until then.
   const tree = await input.page.ariaSnapshot({
     mode: "ai",
@@ -461,8 +463,9 @@ const capture = async (
     });
   return {
     ...page,
-    // Text that holds a value would otherwise show where the tree masked it.
-    visibleText: mask(page.visibleText),
+    // Text that holds a value would otherwise show where the tree masked it. Masked before
+    // the cut, so a value crossing it can't leave its start showing.
+    visibleText: mask(page.visibleText).slice(0, MAX_VISIBLE_TEXT_LENGTH),
     accessibilityTree,
     consoleEntries: [...input.consoleEntries],
     networkEntries: [...input.networkEntries],
@@ -476,16 +479,24 @@ const capture = async (
   };
 };
 
+/** Snapshots begun per page; observers' snapshots aren't queued, so two can overlap. */
+const snapshotTurns = new WeakMap<Page, number>();
+
 export const snapshot = async (input: SnapshotInput): Promise<PreviewAutomationSnapshot> => {
   const deadline = Date.now() + SNAPSHOT_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(tooBusy()), SNAPSHOT_TIMEOUT_MS);
   });
+  const turn = (snapshotTurns.get(input.page) ?? 0) + 1;
+  snapshotTurns.set(input.page, turn);
   // A page that changed mid-capture, like one rotating ads, has usually settled by a second
-  // try. None starts late, since it would revoke the refs of whichever snapshot came next.
+  // try. None starts late or after another snapshot began, since it would revoke the refs of
+  // whichever snapshot came next.
   const captured = capture(input, deadline).catch((cause: unknown) =>
-    Date.now() < deadline && !(cause instanceof Error && cause.message === VALUE_TOO_LONG)
+    Date.now() < deadline &&
+    snapshotTurns.get(input.page) === turn &&
+    !(cause instanceof Error && cause.message === VALUE_TOO_LONG)
       ? capture(input, deadline)
       : Promise.reject(cause),
   );
