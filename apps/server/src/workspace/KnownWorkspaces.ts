@@ -34,7 +34,10 @@ export class UnknownWorkspaceError extends Schema.TaggedError<UnknownWorkspaceEr
 /** Whether `candidate` is `root` or inside it. Resolve both the same way first. */
 export const isWithinRoot = (path: Path.Path, candidate: string, root: string) => {
   const relative = path.relative(root, candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
 };
 
 export class KnownWorkspaces extends Context.Service<
@@ -93,13 +96,9 @@ export const make = Effect.gen(function* () {
         WHERE deleted_at IS NULL AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
       `.pipe(Effect.orElseSucceed(() => []));
       for (const { worktreePath } of threads) {
-        // Worktrees T3 made sit in a managed folder, which was checked above.
-        if (
-          !path.isAbsolute(worktreePath) ||
-          managed.some((root) => path.resolve(worktreePath).startsWith(`${root}${path.sep}`))
-        ) {
-          continue;
-        }
+        // A relative path would resolve against the server's own cwd. One under a
+        // managed folder is still resolved: it can be a symlink to a checkout elsewhere.
+        if (!path.isAbsolute(worktreePath)) continue;
         if (within(yield* resolveRoot(worktreePath))) return true;
       }
       return false;

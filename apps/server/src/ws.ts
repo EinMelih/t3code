@@ -1264,7 +1264,6 @@ const layerWsRpc = (
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
-      const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -2644,8 +2643,7 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsWriteFile]: (input) =>
-          knownWorkspaces.assertContains(input.cwd).pipe(
-            Effect.andThen(workspaceFileSystem.writeFile(input)),
+          workspaceFileSystem.writeFile(input).pipe(
             Effect.mapError(
               (cause) =>
                 new ProjectWriteFileError({

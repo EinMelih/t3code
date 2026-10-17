@@ -203,6 +203,10 @@ describe("ReviewService", () => {
 
       assert.strictEqual((yield* review(projectRoot, [projectRoot])).cwd, projectRoot);
       assert.strictEqual((yield* review(projectChild, [projectRoot])).cwd, projectChild);
+      // A child whose name starts with `..` is still inside.
+      const dottedChild = `${projectRoot}/..feature`;
+      yield* fs.makeDirectory(dottedChild);
+      assert.strictEqual((yield* review(dottedChild, [projectRoot])).cwd, dottedChild);
       for (const [cwd, projectRoots] of [
         [sibling, [projectRoot]],
         [projectRoot, []],
@@ -255,6 +259,34 @@ describe("ReviewService", () => {
         const error = yield* review(cwd).pipe(Effect.flip);
         assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
       }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("allows a thread's worktree linked from a managed folder to a checkout elsewhere", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-workspace-" });
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-base-" });
+      const managed = yield* fs.realPath(
+        yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-worktrees-" }),
+      );
+      const checkout = yield* fs.makeTempDirectoryScoped({ prefix: "t3-review-checkout-" });
+      yield* fs.symlink(checkout, `${managed}/feature`);
+
+      const result = yield* Effect.gen(function* () {
+        const review = yield* ReviewService.ReviewService;
+        return yield* review.getDiffPreview({ cwd: checkout });
+      }).pipe(
+        Effect.provide(
+          layer({
+            workspaceRoot,
+            baseDir,
+            worktreesDirectory: managed,
+            threadWorktrees: [{ worktreePath: `${managed}/feature` }],
+          }),
+        ),
+      );
+      assert.strictEqual(result.cwd, checkout);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

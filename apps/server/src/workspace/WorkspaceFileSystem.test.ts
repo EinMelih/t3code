@@ -11,13 +11,24 @@ import * as Path from "effect/Path";
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as KnownWorkspaces from "./KnownWorkspaces.ts";
 import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
+// Temp folders count as known workspaces unless named as unknown.
+const UNKNOWN_WORKSPACE_PREFIX = "t3code-unknown-workspace-";
+const layerKnownWorkspacesTest = Layer.mock(KnownWorkspaces.KnownWorkspaces)({
+  assertContains: (cwd) =>
+    cwd.includes(UNKNOWN_WORKSPACE_PREFIX)
+      ? Effect.fail(new KnownWorkspaces.UnknownWorkspaceError({ cwd }))
+      : Effect.void,
+});
+
 const layerProject = WorkspaceFileSystem.layer.pipe(
+  Layer.provide(layerKnownWorkspacesTest),
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer))),
 );
@@ -360,6 +371,23 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
+    it.effect("rejects writes outside a known workspace", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: UNKNOWN_WORKSPACE_PREFIX,
+        });
+
+        const error = yield* workspaceFileSystem
+          .writeFile({ cwd, relativePath: "plan.md", contents: "# nope\n" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(KnownWorkspaces.UnknownWorkspaceError);
+        expect(yield* fileSystem.readDirectory(cwd)).toEqual([]);
+      }),
+    );
+
     it.effect("rejects writes by absolute path", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -591,6 +619,29 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           yield* fileSystem.readFileString(path.join(cwd, ".bare/worktrees/main/commondir")),
         ).toBe("../..\n");
       }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "refuses writes through a git config that links to a file outside git's folders",
+      () =>
+        Effect.gen(function* () {
+          const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          yield* writeTextFile(cwd, "shared/config", "[core]\n");
+          yield* fileSystem.makeDirectory(path.join(cwd, ".git"));
+          yield* fileSystem.symlink("../shared/config", path.join(cwd, ".git/config"));
+
+          const error = yield* workspaceFileSystem
+            .writeFile({ cwd, relativePath: ".git/config", contents: "[core]\n\tfsmonitor = x\n" })
+            .pipe(Effect.flip);
+
+          expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFilePathEscapeError);
+          expect(yield* fileSystem.readFileString(path.join(cwd, "shared/config"))).toBe(
+            "[core]\n",
+          );
+        }),
     );
 
     it.effect("writes files that sit beside git's folders", () =>

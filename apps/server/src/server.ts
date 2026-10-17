@@ -426,6 +426,7 @@ const layerWorkspaceEntries = WorkspaceEntries.layer.pipe(Layer.provide(Workspac
 const layerWorkspaceFileSystem = WorkspaceFileSystem.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(layerWorkspaceEntries),
+  Layer.provide(layerKnownWorkspaces),
 );
 
 const layerWorkspace = Layer.mergeAll(
