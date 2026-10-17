@@ -151,8 +151,11 @@ export function renderWebhookPrompt(
       if (!missing.includes(expression)) missing.push(expression);
       return "";
     }
+    const text = stringify(value);
+    // An empty value carries no request data, so it needs no frame or note.
+    if (text === "") return "";
     framed = true;
-    return `<${tag}>${stringify(value).replace(MENTION, "$&\u2060")}</${tag}>`;
+    return `<${tag}>${text.replace(MENTION, "$&\u2060")}</${tag}>`;
   });
   if (!framed) return { prompt, missing };
   return {

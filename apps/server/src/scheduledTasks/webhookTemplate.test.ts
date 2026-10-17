@@ -114,6 +114,12 @@ describe("renderWebhookPrompt", () => {
     assert.deepEqual(rendered.missing, ["body.nope", "headers.x-missing", "unknown"]);
   });
 
+  it("leaves empty values unframed and does not report them missing", () => {
+    const rendered = renderWebhookPrompt("{{body}}", { ...githubPullRequest, bodyText: "" }, "id");
+    assert.equal(rendered.prompt, "");
+    assert.deepEqual(rendered.missing, []);
+  });
+
   it("trims placeholder whitespace before resolving and reporting missing fields", () => {
     const rendered = renderWebhookPrompt(
       "{{\tbody.action\n}}|{{  body.nope  }}|{{\nbody.nope\t}}|{{ \t\n }}",
