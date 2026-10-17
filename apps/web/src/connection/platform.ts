@@ -178,13 +178,6 @@ function sshPreparationError(cause: unknown) {
   });
 }
 
-function differentSshMachineError(label: string) {
-  return new ConnectionBlockedError({
-    reason: "configuration",
-    detail: `That host reaches ${label}, a different machine. Add it as its own environment instead.`,
-  });
-}
-
 export const provisionDesktopSshEnvironment = Effect.fn(
   "web.connectionPlatform.ssh.provisionDesktop",
 )(function* (
@@ -211,7 +204,10 @@ export const provisionDesktopSshEnvironment = Effect.fn(
     catch: sshPreparationError,
   });
   if (expectedEnvironmentId !== undefined && descriptor.environmentId !== expectedEnvironmentId) {
-    return yield* differentSshMachineError(descriptor.label);
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: `That host reaches ${descriptor.label}, a different machine. Add it as its own environment instead.`,
+    });
   }
   const access = yield* Effect.tryPromise({
     try: () => bridge.bootstrapSshBearerSession(bootstrap.httpBaseUrl, pairingToken),
@@ -252,7 +248,10 @@ export const prepareDesktopSshEnvironment = Effect.fn("web.connectionPlatform.ss
         catch: sshPreparationError,
       });
       if (descriptor.environmentId !== input.expectedEnvironmentId) {
-        return yield* differentSshMachineError(descriptor.label);
+        return yield* new ConnectionBlockedError({
+          reason: "configuration",
+          detail: `That host reaches ${descriptor.label}, a different machine. Add it as its own environment instead.`,
+        });
       }
       const session = yield* Effect.tryPromise({
         try: () => bridge.fetchSshSessionState(bootstrap.httpBaseUrl, bearerToken),
