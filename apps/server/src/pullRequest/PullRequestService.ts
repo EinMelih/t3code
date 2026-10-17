@@ -4,6 +4,7 @@ import {
   sourceControlRepositorySelector,
 } from "@t3tools/shared/sourceControl";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+import { parseDiffFilePaths } from "@t3tools/source-control-core/server/diffFileRevisions";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -1717,7 +1718,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const diffFileContents: PullRequestService["Service"]["diffFileContents"] = (input) =>
+  const readDiffFileContents: PullRequestService["Service"]["diffFileContents"] = (input) =>
     requireProject(input).pipe(
       Effect.flatMap((project) => {
         const read = project.api.getDiffFileContents;
@@ -3247,6 +3248,52 @@ export const make = Effect.gen(function* () {
           ...args,
         );
       });
+
+  const cachedDiff = credentialCached(diff);
+  /**
+   * Whether the change request, or the one commit asked for, changes this file under these names.
+   * Walks the same cached slices the reader was shown, so the file being expanded is already held.
+   */
+  const changesFile = (input: PullRequestDiffFileContentsInput) => {
+    const named = (patch: string) =>
+      parseDiffFilePaths(patch).some(
+        (file) =>
+          (file.oldPath ?? file.newPath) === input.oldPath &&
+          (file.newPath ?? file.oldPath) === input.newPath,
+      );
+    const walk = (cursor: string | undefined): Effect.Effect<boolean, PullRequestError> =>
+      cachedDiff({
+        ...input,
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(input.commit === undefined ? {} : { commit: input.commit }),
+      }).pipe(
+        Effect.flatMap((slice) =>
+          named(slice.patch)
+            ? Effect.succeed(true)
+            : slice.nextCursor === null
+              ? Effect.succeed(false)
+              : walk(slice.nextCursor),
+        ),
+      );
+    return walk(undefined);
+  };
+  // Only the files the change request itself changes: these are read with the project's own
+  // credential, and a reader who may look at the change request may not thereby read the rest of
+  // the repository.
+  const diffFileContents: PullRequestService["Service"]["diffFileContents"] = (input) =>
+    changesFile(input).pipe(
+      Effect.flatMap((changed) =>
+        changed
+          ? readDiffFileContents(input)
+          : Effect.fail(
+              new PullRequestOperationError({
+                operation: "diffFileContents",
+                detail: "This file is not part of the change request.",
+                reason: "not-found",
+              }),
+            ),
+      ),
+    );
 
   return PullRequestService.of({
     routing,
