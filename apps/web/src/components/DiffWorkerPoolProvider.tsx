@@ -2,14 +2,7 @@ import { WorkerPoolContext, useWorkerPool } from "@pierre/diffs/react";
 import { WorkerPoolManager } from "@pierre/diffs/worker";
 import DiffsWorker from "@pierre/diffs/worker/worker.js?worker";
 import * as Schema from "effect/Schema";
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  useSyncExternalStore,
-  type ReactNode,
-} from "react";
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useTheme } from "../hooks/useTheme";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "../lib/syntaxHighlighting";
@@ -25,6 +18,11 @@ export class DiffWorkerError extends Schema.TaggedError<DiffWorkerError>()("Diff
 }
 
 const DIFF_WORKER_IDLE_TTL_MS = 30_000;
+const DIFF_WORKER_POOL_SIZE = (() => {
+  const cores =
+    typeof navigator === "undefined" ? 4 : Math.max(1, navigator.hardwareConcurrency || 4);
+  return Math.max(2, Math.min(6, Math.floor(cores / 2)));
+})();
 let sharedWorkerPool:
   | {
       readonly pool: WorkerPoolManager;
@@ -129,29 +127,21 @@ function DiffWorkerReady({ children }: { children?: ReactNode }) {
 export function DiffWorkerPoolProvider({ children }: { children?: ReactNode }) {
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const workerPoolSize = useMemo(() => {
-    const cores =
-      typeof navigator === "undefined" ? 4 : Math.max(1, navigator.hardwareConcurrency || 4);
-    return Math.max(2, Math.min(6, Math.floor(cores / 2)));
-  }, []);
   const workerPool = useSyncExternalStore(
-    useCallback(
-      (onStoreChange) => {
-        if (typeof window === "undefined") return () => {};
-        const entry = acquireDiffWorkerPool(diffThemeName, workerPoolSize);
-        onStoreChange();
-        return () => {
-          entry.consumers -= 1;
-          if (entry.consumers !== 0) return;
-          entry.idleTimer = setTimeout(() => {
-            entry.idleTimer = undefined;
-            entry.pool.terminate();
-            if (sharedWorkerPool === entry) sharedWorkerPool = undefined;
-          }, DIFF_WORKER_IDLE_TTL_MS);
-        };
-      },
-      [diffThemeName, workerPoolSize],
-    ),
+    (onStoreChange) => {
+      if (typeof window === "undefined") return () => {};
+      const entry = acquireDiffWorkerPool(diffThemeName, DIFF_WORKER_POOL_SIZE);
+      onStoreChange();
+      return () => {
+        entry.consumers -= 1;
+        if (entry.consumers !== 0) return;
+        entry.idleTimer = setTimeout(() => {
+          entry.idleTimer = undefined;
+          entry.pool.terminate();
+          if (sharedWorkerPool === entry) sharedWorkerPool = undefined;
+        }, DIFF_WORKER_IDLE_TTL_MS);
+      };
+    },
     () => sharedWorkerPool?.pool,
     () => undefined,
   );
