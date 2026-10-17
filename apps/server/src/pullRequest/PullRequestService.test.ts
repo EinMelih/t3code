@@ -7723,7 +7723,7 @@ it.effect("expands only files the change request changes, across every slice of 
         project({ id: "p1", title: "t3code", workspaceRoot: "/a", repository: "pingdotgg/t3code" }),
       ],
       providers: [
-        fakeProvider("github", {
+        fakeProvider(SourceControlProviderKind.make("github"), {
           getDiff: (input) =>
             Effect.succeed(
               input.cursor === undefined
