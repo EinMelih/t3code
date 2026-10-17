@@ -4,13 +4,14 @@ import { orderItemsByPreferredIds, sortSidebarV2ProjectGroups } from "../compone
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { useEnvironmentIdentities, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useThreadShells } from "../state/entities";
+import { useDelegatedUnderParent, useProjects, useThreadShells } from "../state/entities";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
 
 export function useSidebarProjectGroups() {
   const projects = useProjects();
   const threads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const sortOrder = useClientSettings((s) => s.sidebarProjectSortOrder);
   const groupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -42,7 +43,7 @@ export function useSidebarProjectGroups() {
     });
   }, [environments, groupingSettings, orderedProjects, primaryEnvironmentId, projects, sortOrder]);
   return useMemo(
-    () => sortSidebarV2ProjectGroups(unsortedGroups, threads, sortOrder),
-    [sortOrder, threads, unsortedGroups],
+    () => sortSidebarV2ProjectGroups(unsortedGroups, threads, sortOrder, delegatedUnderParent),
+    [delegatedUnderParent, sortOrder, threads, unsortedGroups],
   );
 }
