@@ -918,7 +918,8 @@ const collectOutput = Effect.fnUntraced(function* (
 export const windowsLongPathConfigEnv = (
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv => (platform === "win32" ? gitConfigEnv(env, "core.longpaths", "true") : {});
+): NodeJS.ProcessEnv =>
+  platform === "win32" ? gitConfigEnv(env, "core.longpaths", "true", platform) : {};
 
 export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;

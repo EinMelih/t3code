@@ -38,6 +38,7 @@ import {
   windowsLongPathConfigEnv,
 } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
+import { gitConfigEnv } from "./VcsProcess.ts";
 
 const encodeGitCommandError = Schema.encodeEffect(Schema.fromJsonString(GitCommandError));
 
@@ -4390,6 +4391,17 @@ describe("Windows long path configuration", () => {
         git_config_count: "2",
         GIT_CONFIG_KEY_1: "core.longpaths",
         GIT_CONFIG_VALUE_1: "true",
+      },
+    );
+  });
+
+  it("reads only the exact count name outside Windows", () => {
+    assert.deepStrictEqual(
+      gitConfigEnv({ git_config_count: "3" }, "safe.bareRepository", "explicit", "linux"),
+      {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "safe.bareRepository",
+        GIT_CONFIG_VALUE_0: "explicit",
       },
     );
   });
