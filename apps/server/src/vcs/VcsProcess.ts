@@ -65,18 +65,18 @@ export const CHECKPOINT_CAPTURE_OPERATION = "GitVcsDriver.checkpoints.captureChe
  * Appends `key=value` to the `GIT_CONFIG_*` entries git reads as command-line
  * config, so argv stays the same on every platform and nothing is written to
  * the user's config. The entry goes after any inherited ones. Windows env names
- * are case-insensitive, so the inherited count is found regardless of casing
- * and updated under its own name. A count git would reject is left alone so git
- * still reports it.
+ * are case-insensitive, so the count is found regardless of casing, read from
+ * the last spelling (a per-command value spread over process.env), and updated
+ * under every spelling so the child sees it whichever one Node keeps. A count
+ * git would reject is left alone so git still reports it.
  */
 export const gitConfigEnv = (
   env: NodeJS.ProcessEnv,
   key: string,
   value: string,
 ): NodeJS.ProcessEnv => {
-  const countKey =
-    Object.keys(env).find((name) => name.toUpperCase() === "GIT_CONFIG_COUNT") ??
-    "GIT_CONFIG_COUNT";
+  const countKeys = Object.keys(env).filter((name) => name.toUpperCase() === "GIT_CONFIG_COUNT");
+  const countKey = countKeys.at(-1) ?? "GIT_CONFIG_COUNT";
   const inherited = env[countKey];
   if (
     inherited !== undefined &&
@@ -89,7 +89,7 @@ export const gitConfigEnv = (
   }
   const count = inherited === undefined || inherited === "" ? 0 : Number.parseInt(inherited, 10);
   return {
-    [countKey]: String(count + 1),
+    ...Object.fromEntries([...countKeys, countKey].map((name) => [name, String(count + 1)])),
     [`GIT_CONFIG_KEY_${count}`]: key,
     [`GIT_CONFIG_VALUE_${count}`]: value,
   };

@@ -4382,6 +4382,18 @@ describe("Windows long path configuration", () => {
     });
   });
 
+  it("extends the per-command count when inherited and per-command casings differ", () => {
+    assert.deepStrictEqual(
+      windowsLongPathConfigEnv("win32", { GIT_CONFIG_COUNT: "0", git_config_count: "1" }),
+      {
+        GIT_CONFIG_COUNT: "2",
+        git_config_count: "2",
+        GIT_CONFIG_KEY_1: "core.longpaths",
+        GIT_CONFIG_VALUE_1: "true",
+      },
+    );
+  });
+
   it("appends after inherited entries, parsing the count as Git does", () => {
     for (const [count, next] of [
       [undefined, 0],
