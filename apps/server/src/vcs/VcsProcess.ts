@@ -18,6 +18,8 @@ import {
   VcsProcessStdinWriteError,
   VcsProcessTimeoutError,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+
 import * as ProcessRunner from "../processRunner.ts";
 
 export interface VcsProcessInput {
@@ -75,7 +77,7 @@ export const gitConfigEnv = (
   env: NodeJS.ProcessEnv,
   key: string,
   value: string,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
 ): NodeJS.ProcessEnv => {
   const countKeys = Object.keys(env).filter((name) =>
     platform === "win32" ? name.toUpperCase() === "GIT_CONFIG_COUNT" : name === "GIT_CONFIG_COUNT",
@@ -106,8 +108,8 @@ export const gitConfigEnv = (
  * form one, so git started by T3 (or by gh and friends) only opens a bare
  * repository named with `--git-dir` or `GIT_DIR`. Git before 2.38 ignores it.
  */
-export const explicitBareRepositoryEnv = (env: NodeJS.ProcessEnv) =>
-  gitConfigEnv(env, "safe.bareRepository", "explicit");
+export const explicitBareRepositoryEnv = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform) =>
+  gitConfigEnv(env, "safe.bareRepository", "explicit", platform);
 
 const classifyNonZeroExit = (command: string, stderr: string): VcsProcessExitFailureKind => {
   const normalized = stderr.toLowerCase();
@@ -162,6 +164,7 @@ const isTransientGitExit = (stderr: string) =>
 
 export const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
+  const hostPlatform = yield* HostProcess.Platform;
   const vcsProcesses = yield* Semaphore.make(VCS_PROCESS_CONCURRENCY);
   const githubProcesses = yield* Semaphore.make(GITHUB_PROCESS_CONCURRENCY);
 
@@ -181,7 +184,10 @@ export const make = Effect.gen(function* () {
         ...(input.spawnCwd !== undefined ? { spawnCwd: input.spawnCwd } : {}),
         ...(input.stdin !== undefined ? { stdin: input.stdin } : {}),
         ...(input.onStdoutChunk !== undefined ? { onStdoutChunk: input.onStdoutChunk } : {}),
-        env: { ...input.env, ...explicitBareRepositoryEnv({ ...process.env, ...input.env }) },
+        env: {
+          ...input.env,
+          ...explicitBareRepositoryEnv({ ...process.env, ...input.env }, hostPlatform),
+        },
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
         outputMode: input.outputMode ?? "truncate",
