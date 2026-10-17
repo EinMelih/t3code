@@ -1105,7 +1105,7 @@ function PullRequestsRouteView() {
   const [closeSweepKeys, setCloseSweepKeys] = useState<ReadonlySet<string>>(() => new Set());
   const closeSensorRef = useRef<SidebarPointerSensor | null>(null);
   // A sweep spans many renders; each step reads the rows on screen at that moment.
-  const readCloseSweep = useEffectEvent(() => ({
+  const readCloseSweep = useStableCallback(() => ({
     displayGroups,
     closeSweepRows,
     closingKeys,
