@@ -76,7 +76,10 @@ function iso(value: string | undefined): string | undefined {
   return Option.isSome(parsed) ? DateTime.formatIso(parsed.value) : undefined;
 }
 
-function parseResetTimeFromDescription(description: string | undefined): string | undefined {
+function parseResetTimeFromDescription(
+  description: string | undefined,
+  now: number,
+): string | undefined {
   if (!description) return undefined;
   const match = /refresh(?:es)? in\s+([^.]+)/i.exec(description);
   if (!match?.[1]) return undefined;
@@ -86,7 +89,7 @@ function parseResetTimeFromDescription(description: string | undefined): string 
   const minutes = Number(/(\d+)\s*m(?:in(?:ute)?s?)?/i.exec(clause)?.[1] ?? 0);
   const totalMs = ((days * 24 + hours) * 60 + minutes) * 60_000;
   if (totalMs <= 0) return undefined;
-  return new Date(Date.now() + totalMs).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(now + totalMs));
 }
 
 function quotaWindow(
@@ -110,7 +113,7 @@ function quotaWindow(
   };
 }
 
-function summaryWindows(summary: typeof Summary.Type) {
+function summaryWindows(summary: typeof Summary.Type, now: number) {
   const windows = new Map<string, ServerProviderUsageWindow>();
   const groups = [
     ...(summary.groups ?? []),
@@ -129,8 +132,7 @@ function summaryWindows(summary: typeof Summary.Type) {
       const rawWindow = bucket.window?.trim().toLowerCase() ?? "";
       const displayName = bucket.displayName?.trim() ?? "";
       const description = bucket.description?.trim() ?? "";
-      const weekly =
-        rawWindow === "weekly" || /weekly/i.test(rawId) || /weekly/i.test(displayName);
+      const weekly = rawWindow === "weekly" || /weekly/i.test(rawId) || /weekly/i.test(displayName);
       const session =
         rawWindow === "5h" ||
         rawWindow === "5-hour" ||
@@ -155,7 +157,7 @@ function summaryWindows(summary: typeof Summary.Type) {
               ((weekly || session) && (Boolean(displayName) || Boolean(description)))
             ? 0
             : undefined;
-      const inferredResetTime = bucket.resetTime ?? parseResetTimeFromDescription(description);
+      const inferredResetTime = bucket.resetTime ?? parseResetTimeFromDescription(description, now);
       const effectiveQuota = {
         ...bucket,
         ...(inferredFraction !== undefined ? { remainingFraction: inferredFraction } : {}),
@@ -323,67 +325,71 @@ export const makeAntigravityUsageProbe = Effect.fn("makeAntigravityUsageProbe")(
       account = cached.account;
     }
     const needsProjectResolution = !token.project_id || token.project_id === "aicode-consumers";
-    let resolvedCompanionProject: string | null | undefined;
+    let resolvedCompanionProject: string | undefined;
+    if (needsProjectResolution) {
+      for (const endpoint of ENDPOINTS) {
+        resolvedCompanionProject = yield* request(
+          HttpClientRequest.post(`${endpoint}/v1internal:loadCodeAssist`).pipe(
+            HttpClientRequest.setHeaders({
+              Authorization: `Bearer ${accessToken}`,
+              "User-Agent": userAgent,
+            }),
+            HttpClientRequest.bodyJsonUnsafe({ metadata: { ideType: "ANTIGRAVITY" } }),
+          ),
+        ).pipe(
+          Effect.map(extractCompanionProject),
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (resolvedCompanionProject) break;
+      }
+    }
+    const projectCandidates = needsProjectResolution
+      ? [
+          ...new Set([
+            ...(resolvedCompanionProject ? [resolvedCompanionProject] : []),
+            ...(token.project_id ? [token.project_id] : []),
+            "",
+          ]),
+        ]
+      : [token.project_id!];
+    // Endpoints can report different quota groups (the daily endpoint has
+    // returned the Claude/GPT group without Gemini), so merge every endpoint's
+    // windows. The most-used reading of a bucket wins, as in modelWindows.
     const fetchWindows = Effect.fn("AntigravityUsageProbe.fetchWindows")(function* <E>(
       operation: string,
       parse: (response: unknown) => Effect.Effect<ServerProviderUsageWindow[], E>,
     ) {
-      let bestWindows: ServerProviderUsageWindow[] = [];
-      for (const endpoint of ENDPOINTS) {
-        if (needsProjectResolution && resolvedCompanionProject === undefined) {
-          resolvedCompanionProject =
-            (yield* request(
-              HttpClientRequest.post(`${endpoint}/v1internal:loadCodeAssist`).pipe(
+      const responses = yield* Effect.forEach(
+        ENDPOINTS,
+        Effect.fnUntraced(function* (endpoint) {
+          for (const projectId of projectCandidates) {
+            const windows = yield* request(
+              HttpClientRequest.post(`${endpoint}/v1internal:${operation}`).pipe(
                 HttpClientRequest.setHeaders({
                   Authorization: `Bearer ${accessToken}`,
                   "User-Agent": userAgent,
                 }),
-                HttpClientRequest.bodyJsonUnsafe({ metadata: { ideType: "ANTIGRAVITY" } }),
+                HttpClientRequest.bodyJsonUnsafe(projectId ? { project: projectId } : {}),
               ),
             ).pipe(
-              Effect.map(extractCompanionProject),
-              Effect.orElseSucceed(() => undefined),
-            )) ?? null;
-        }
-        const projectCandidates = needsProjectResolution
-          ? [
-              ...new Set([
-                ...(resolvedCompanionProject ? [resolvedCompanionProject] : []),
-                ...(token.project_id ? [token.project_id] : []),
-                "",
-              ]),
-            ]
-          : [token.project_id!];
-        for (const projectId of projectCandidates) {
-          const windows = yield* request(
-            HttpClientRequest.post(`${endpoint}/v1internal:${operation}`).pipe(
-              HttpClientRequest.setHeaders({
-                Authorization: `Bearer ${accessToken}`,
-                "User-Agent": userAgent,
-              }),
-              HttpClientRequest.bodyJsonUnsafe(projectId ? { project: projectId } : {}),
-            ),
-          ).pipe(
-            Effect.flatMap(parse),
-            Effect.orElseSucceed(() => []),
-          );
-          if (windows.length > bestWindows.length) {
-            bestWindows = windows;
+              Effect.flatMap(parse),
+              Effect.orElseSucceed(() => []),
+            );
+            if (windows.length > 0) return windows;
           }
-          if (
-            windows.length > 0 &&
-            (operation !== "retrieveUserQuotaSummary" ||
-              windows.some((window) => window.id.startsWith("gemini-")))
-          ) {
-            return windows;
-          }
-        }
-        if (bestWindows.length > 0) return bestWindows;
+          return [];
+        }),
+        { concurrency: "unbounded" },
+      );
+      const windows = new Map<string, ServerProviderUsageWindow>();
+      for (const window of responses.flat()) {
+        const previous = windows.get(window.id);
+        if (!previous || window.usedPercent > previous.usedPercent) windows.set(window.id, window);
       }
-      return bestWindows;
+      return [...windows.values()];
     });
     const summary = yield* fetchWindows("retrieveUserQuotaSummary", (response) =>
-      decodeSummary(response).pipe(Effect.map(summaryWindows)),
+      decodeSummary(response).pipe(Effect.map((summary) => summaryWindows(summary, now))),
     );
     const hasGemini5h = summary.some((window) => window.id === "gemini-5h");
     const hasWeeklySummary = summary.some((window) => window.kind === "weekly");
